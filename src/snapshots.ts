@@ -116,7 +116,7 @@ async function readBounded(path: string, max: number): Promise<Buffer> {
   if (bytes.length > max) throw new ReaderError("snapshot-invalid");
   return bytes;
 }
-async function validateSnapshot(
+export async function validateSnapshot(
   directory: string,
   digest: string,
 ): Promise<SnapshotManifest> {

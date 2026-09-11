@@ -2,7 +2,9 @@
 
 A local macOS reader for Kindle Scribe cloud notebooks. It uses its own Amazon sign-in window and preserves rendered page PNGs without resizing, recompression, or transcription.
 
-The reader supports login, notebook listing, a bounded single-page probe, and notebook sync. A complete live notebook capture, both repeat-sync modes, and rejection of an edit during capture have been verified on macOS.
+The reader supports login, notebook listing, a bounded single-page probe, and notebook sync. It also includes a resident notebook-change watcher and a portable preparation skill. The watcher polls without a model and queues an existing Codex task only when notebook content changes. See [watcher setup](docs/watch.md).
+
+A complete live notebook capture, both repeat-sync modes, and rejection of an edit during capture have been verified on macOS.
 
 This project is independent of Amazon and Obsidian. It does not write to cloud notebooks.
 
@@ -93,6 +95,10 @@ Live verification on September 11, 2026 covered dedicated-profile login, noteboo
 These results establish the observed capture and comparison behavior. Consistency remains `metadata-bracketed`; the runs do not establish server revision isolation or unattended operation.
 
 `src/account.ts` owns the Electron session and fixed requests. `src/archive.ts` validates archive and PNG bytes. `src/protocol.ts` validates the observed single-page mapping. `src/snapshots.ts` owns capture comparison and publication. `src/main.ts` holds process ownership for each CLI command.
+
+`src/watch.ts` owns the supervisor, immutable receipts, queue attempts, and acknowledgement reconciliation. `src/watch-service.ts` manages the user LaunchAgent. The bundled [preparation skill](skills/scribe-prep/SKILL.md) includes its SQLite ledger, output renderers, policy, and synthetic tests. Its Python state directory is explicit, and its PDF dependency is pinned to ReportLab 4.4.9.
+
+Native cloud notebook writeback remains unimplemented and unverified. Historical users reported replacing an editable native notebook over USB and subsequent synchronization. That is a concrete research lead rather than proof of a cloud write API. See the [firsthand report](https://www.mobileread.com/forums/showpost.php?p=4391735&postcount=635) and [capability notes](skills/scribe-prep/references/scribe-access.md). Preparation output remains a separate local companion.
 
 ## Acknowledgment
 

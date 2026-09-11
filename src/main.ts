@@ -30,6 +30,7 @@ async function main() {
   await mkdir(root, { recursive: true, mode: 0o700 });
   if (!app.requestSingleInstanceLock()) throw new ReaderError("busy");
   await app.whenReady();
+  if (command.kind !== "login") app.dock?.hide();
   const ownedSession = session.fromPartition("persist:scribe-reader");
   ownedSession.setPermissionRequestHandler(
     (_webContents, _permission, callback) => callback(false),
