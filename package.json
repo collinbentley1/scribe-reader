@@ -7,11 +7,13 @@
   "main": "dist/main.cjs",
   "packageManager": "bun@1.4.2",
   "scripts": {
-    "build": "bun build src/main.ts --target=node --format=cjs --external=electron --external=pngjs --outfile=dist/main.cjs",
+    "build": "bun build src/main.ts --target=node --format=cjs --external=electron --external=pngjs --outfile=dist/main.cjs && bun build src/watch-cli.ts --target=bun --outfile=dist/watch.js",
     "start": "electron .",
     "check": "tsc --noEmit",
     "test": "bun test",
-    "format": "prettier --write src test README.md package.json tsconfig.json"
+    "format": "prettier --write src test README.md package.json tsconfig.json",
+    "watch": "bun --no-env-file src/watch-cli.ts",
+    "test:skill": "python3 -m unittest discover -s skills/scribe-prep/tests -v"
   },
   "dependencies": {
     "pngjs": "7.0.0"
@@ -21,6 +23,8 @@
     "typescript": "7.0.2",
     "@types/node": "22.20.2",
     "@types/pngjs": "6.0.5",
-    "prettier": "3.9.6"
-  }
+    "prettier": "3.9.6",
+    "@types/bun": "1.4.2"
+  },
+  "type": "module"
 }

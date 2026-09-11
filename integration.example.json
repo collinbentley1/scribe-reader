@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "workspace": "/absolute/private/preparation-workspace",
+  "state_root": "/absolute/private/preparation-workspace/state",
+  "inbox": "/absolute/private/preparation-workspace/inbox",
+  "skill": "/Users/YOUR_USERNAME/.codex/skills/scribe-prep/SKILL.md",
+  "cloud_reader": {
+    "enabled": true,
+    "source_directory": "/absolute/stable/scribe-reader",
+    "private_storage": "/Users/YOUR_USERNAME/Library/Application Support/Scribe Reader",
+    "notebook_id": "YOUR_NOTEBOOK_ID",
+    "review_checkpoint": "/absolute/private/preparation-workspace/review-checkpoint.json"
+  },
+  "watcher": {
+    "thread_id": "YOUR_EXISTING_CODEX_THREAD_UUID",
+    "codex_executable": "/absolute/path/to/codex",
+    "python_executable": "/absolute/stable/scribe-reader/.venv/bin/python",
+    "bun_executable": "/opt/homebrew/bin/bun"
+  }
+}
