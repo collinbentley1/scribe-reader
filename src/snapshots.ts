@@ -20,7 +20,11 @@ import {
   SETTINGS,
   string,
 } from "./domain.js";
-import { matchesPageMember, parseRenderedPage, PROTOCOL } from "./protocol.js";
+import {
+  isSourceImageMember,
+  parseRenderedPage,
+  PROTOCOL,
+} from "./protocol.js";
 import { validatePng } from "./archive.js";
 
 export type PageRecord = {
@@ -177,7 +181,7 @@ async function validateSnapshot(
       page.file !== file ||
       range.start !== index ||
       range.end !== index ||
-      !matchesPageMember(sourceMemberName, index)
+      !isSourceImageMember(sourceMemberName)
     )
       throw new ReaderError("snapshot-invalid");
     const bytes = await readBounded(join(directory, file), LIMITS.png),
@@ -279,7 +283,7 @@ export async function syncNotebook({
       signal.throwIfAborted();
       const rendered = parseRenderedPage(
         await account.render(page, before.token),
-        page,
+        { notebookId, page },
       );
       total += rendered.bytes.length;
       if (total > LIMITS.capture) throw new ReaderError("capture-too-large");

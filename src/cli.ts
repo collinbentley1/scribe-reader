@@ -30,4 +30,4 @@ export function parseCommand(args: string[]): Command {
   throw new ReaderError("invalid-arguments");
 }
 export const HELP =
-  "Scribe Reader\n\n  login\n  list\n  probe NOTEBOOK_ID [--page ORDINAL]\n  sync NOTEBOOK_ID [--full]\n\nProbe uses an unverified zero-based single-page range hypothesis.\n";
+  "Scribe Reader\n\n  login\n  list\n  probe NOTEBOOK_ID [--page ORDINAL]\n  sync NOTEBOOK_ID [--full]\n\nProbe saves a bounded raw response for private inspection. Sync validates every page before publication.\n";
