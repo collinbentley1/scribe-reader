@@ -1,114 +1,185 @@
-import { BrowserWindow, net, type Session } from "electron";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { Readable } from "node:stream";
 import {
   LIMITS,
   parseNotes,
   parseOpen,
   ReaderError,
-  SETTINGS,
+  record,
+  integer,
 } from "./domain.js";
 
+const CONTROL_LIMIT = 65_536;
 type Request =
+  | { kind: "connect"; login: boolean }
   | { kind: "notes" }
   | { kind: "open"; notebookId: string }
   | { kind: "render"; page: number; token: string };
+const NATIVE_ERRORS = new Set([
+  "protocol-unsupported",
+  "authentication-required",
+  "network-error",
+  "service-error",
+  "response-too-large",
+  "request-timeout",
+  "interrupted",
+  "busy",
+  "login-cancelled",
+  "local-error",
+]);
+
+export class FrameReader {
+  private readonly iterator: AsyncIterator<Buffer>;
+  private pending: Buffer = Buffer.alloc(0);
+  constructor(stream: Readable) {
+    this.iterator = stream[Symbol.asyncIterator]();
+  }
+  async read(size: number): Promise<Buffer> {
+    const result = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      if (!this.pending.length) {
+        const next = await this.iterator.next();
+        if (next.done) throw new ReaderError("native-transport-closed");
+        this.pending = next.value;
+      }
+      const length = Math.min(size - offset, this.pending.length);
+      this.pending.copy(result, offset, 0, length);
+      this.pending = this.pending.subarray(length);
+      offset += length;
+    }
+    return result;
+  }
+  async response(id: number, limit: number): Promise<Buffer> {
+    const length = (await this.read(4)).readUInt32BE();
+    if (length < 1 || length > CONTROL_LIMIT)
+      throw new ReaderError("protocol-unsupported");
+    let header;
+    try {
+      header = record(
+        JSON.parse((await this.read(length)).toString("utf8")) as unknown,
+      );
+    } catch {
+      throw new ReaderError("protocol-unsupported");
+    }
+    if (header.version !== 1 || header.id !== id)
+      throw new ReaderError("protocol-unsupported");
+    if (
+      header.kind === "error" &&
+      Object.keys(header).length === 4 &&
+      typeof header.error === "string" &&
+      NATIVE_ERRORS.has(header.error)
+    )
+      throw new ReaderError(header.error);
+    if (header.kind !== "body" || Object.keys(header).length !== 4)
+      throw new ReaderError("protocol-unsupported");
+    const size = integer(header.length, 0, LIMITS.archive);
+    if (size > limit) throw new ReaderError("response-too-large");
+    return this.read(size);
+  }
+}
+
 export class Account {
-  constructor(
-    private readonly session: Session,
+  private readonly child: ChildProcessWithoutNullStreams;
+  private readonly frames: FrameReader;
+  private readonly exited: Promise<void>;
+  private closed = false;
+  private inFlight = false;
+  private id = 0;
+  private constructor(
+    executable: string,
     private readonly signal: AbortSignal,
-  ) {}
-  private request(input: Request): Promise<Buffer> {
-    this.signal.throwIfAborted();
-    const url = new URL("https://read.amazon.com");
-    let limit = LIMITS.json;
-    if (input.kind === "notes") url.pathname = "/kindle-notebook/api/notes";
-    if (input.kind === "open") {
-      url.pathname = "/openNotebook";
-      url.search = new URLSearchParams({
-        notebookId: input.notebookId,
-        marketplaceId: SETTINGS.marketplaceId,
-      }).toString();
-    }
-    if (input.kind === "render") {
-      url.pathname = "/renderPage";
-      url.search = new URLSearchParams({
-        startPage: String(input.page),
-        endPage: String(input.page),
-        width: String(SETTINGS.width),
-        height: String(SETTINGS.height),
-        dpi: String(SETTINGS.dpi),
-      }).toString();
-      limit = LIMITS.archive;
-    }
-    return new Promise((resolve, reject) => {
-      const request = net.request({
-        method: "GET",
-        url: url.href,
-        session: this.session,
-        useSessionCookies: true,
-        redirect: "manual",
-      });
-      let finished = false;
-      const finish = (error?: ReaderError, bytes?: Buffer) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        this.signal.removeEventListener("abort", abort);
-        if (error) {
-          request.abort();
-          reject(error);
-        } else resolve(bytes ?? Buffer.alloc(0));
-      };
-      const abort = () => finish(new ReaderError("interrupted"));
-      const timer = setTimeout(
-        () => finish(new ReaderError("request-timeout")),
-        LIMITS.requestMs,
-      );
-      this.signal.addEventListener("abort", abort, { once: true });
-      request.on("redirect", () =>
-        finish(new ReaderError("authentication-required")),
-      );
-      request.on("login", (_info, callback) => {
-        callback();
-        finish(new ReaderError("authentication-required"));
-      });
-      request.on("error", () => finish(new ReaderError("network-error")));
-      if (input.kind === "render")
-        request.setHeader(
-          "x-amzn-karamel-notebook-rendering-token",
-          input.token,
-        );
-      request.on("response", (response) => {
-        if (response.statusCode === 401 || response.statusCode === 403) {
-          finish(new ReaderError("authentication-required"));
-          return;
-        }
-        if (response.statusCode !== 200) {
-          finish(new ReaderError("service-error"));
-          return;
-        }
-        const type = response.headers["content-type"];
-        if (String(type).toLowerCase().includes("text/html")) {
-          finish(new ReaderError("authentication-required"));
-          return;
-        }
-        const chunks: Buffer[] = [];
-        let size = 0;
-        response.on("data", (chunk: Buffer) => {
-          if (finished) return;
-          size += chunk.length;
-          if (size > limit) {
-            finish(new ReaderError("response-too-large"));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        response.on("error", () => finish(new ReaderError("network-error")));
-        response.on("end", () =>
-          finish(undefined, Buffer.concat(chunks, size)),
-        );
-      });
-      request.end();
+  ) {
+    signal.throwIfAborted();
+    this.child = spawn(executable, ["--pipe"], {
+      cwd: "/",
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    this.child.stderr.resume();
+    this.frames = new FrameReader(this.child.stdout);
+    this.exited = new Promise((resolve) => {
+      this.child.once("exit", () => resolve());
+      this.child.once("error", () => {
+        this.child.stdout.destroy();
+        resolve();
+      });
+    });
+    this.child.stdin.on("error", () => {});
+    signal.addEventListener("abort", this.abort, { once: true });
+  }
+  static async connect(
+    executable: string,
+    signal: AbortSignal,
+    login = false,
+  ): Promise<Account> {
+    const account = new Account(executable, signal);
+    try {
+      await account.request({ kind: "connect", login });
+      return account;
+    } catch (error) {
+      await account.close();
+      throw error;
+    }
+  }
+  private readonly abort = () => {
+    void this.close();
+  };
+  async close(): Promise<void> {
+    if (this.closed) return this.exited;
+    this.closed = true;
+    this.signal.removeEventListener("abort", this.abort);
+    this.child.stdin.end();
+    const terminate = setTimeout(() => this.child.kill("SIGTERM"), 1000);
+    const kill = setTimeout(() => this.child.kill("SIGKILL"), 3000);
+    try {
+      await this.exited;
+    } finally {
+      clearTimeout(terminate);
+      clearTimeout(kill);
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
+    }
+  }
+  private async request(input: Request): Promise<Buffer> {
+    if (this.signal.aborted || this.closed)
+      throw new ReaderError("interrupted");
+    if (this.inFlight) throw new ReaderError("busy");
+    const id = ++this.id,
+      body = Buffer.from(JSON.stringify({ version: 1, id, ...input }));
+    if (body.length > CONTROL_LIMIT)
+      throw new ReaderError("protocol-unsupported");
+    const prefix = Buffer.alloc(4);
+    prefix.writeUInt32BE(body.length);
+    this.inFlight = true;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void this.close();
+    }, LIMITS.requestMs + 2000);
+    try {
+      await new Promise<void>((resolve, reject) =>
+        this.child.stdin.write(Buffer.concat([prefix, body]), (error) =>
+          error ? reject(error) : resolve(),
+        ),
+      );
+      return await this.frames.response(
+        id,
+        input.kind === "render"
+          ? LIMITS.archive
+          : input.kind === "connect"
+            ? 0
+            : LIMITS.json,
+      );
+    } catch (error) {
+      if (timedOut) throw new ReaderError("request-timeout");
+      if (this.signal.aborted) throw new ReaderError("interrupted");
+      if (error instanceof ReaderError && NATIVE_ERRORS.has(error.kind))
+        throw error;
+      throw new ReaderError("network-error");
+    } finally {
+      clearTimeout(timer);
+      this.inFlight = false;
+    }
   }
   private async json(input: Request): Promise<unknown> {
     const bytes = await this.request(input);
@@ -131,61 +202,24 @@ export class Account {
     return this.request({ kind: "render", page, token });
   }
   async login(): Promise<void> {
-    const window = new BrowserWindow({
-      width: 1050,
-      height: 850,
-      title: "Scribe Reader sign in",
-      webPreferences: {
-        session: this.session,
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        webSecurity: true,
-      },
-    });
-    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    const guard = (event: Electron.Event, destination: string) => {
+    while (!this.closed && this.child.exitCode === null) {
+      this.signal.throwIfAborted();
       try {
-        const url = new URL(destination);
+        await this.list();
+        return;
+      } catch (error) {
         if (
-          url.protocol !== "https:" ||
-          url.port ||
-          url.username ||
-          url.password ||
-          !["read.amazon.com", "www.amazon.com", "amazon.com"].includes(
-            url.hostname,
-          )
+          !(error instanceof ReaderError) ||
+          ![
+            "authentication-required",
+            "network-error",
+            "service-error",
+          ].includes(error.kind)
         )
-          event.preventDefault();
-      } catch {
-        event.preventDefault();
+          throw error;
       }
-    };
-    window.webContents.on("will-navigate", guard);
-    window.webContents.on("will-redirect", guard);
-    void window.loadURL("https://read.amazon.com/").catch(() => {});
-    try {
-      while (!window.isDestroyed()) {
-        this.signal.throwIfAborted();
-        try {
-          await this.list();
-          return;
-        } catch (error) {
-          if (
-            !(error instanceof ReaderError) ||
-            ![
-              "authentication-required",
-              "network-error",
-              "service-error",
-            ].includes(error.kind)
-          )
-            throw error;
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-      }
-      throw new ReaderError("login-cancelled");
-    } finally {
-      if (!window.isDestroyed()) window.destroy();
+      await new Promise<void>((resolve) => setTimeout(resolve, 2000));
     }
+    throw new ReaderError("login-cancelled");
   }
 }

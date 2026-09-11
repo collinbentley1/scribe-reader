@@ -12,7 +12,11 @@ import {
   withLock,
 } from "./watch.js";
 import { serviceCommand } from "./watch-service.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { realpath } from "node:fs/promises";
+import { parseCommand, type Command as ReaderCommand } from "./cli.js";
+import { PRODUCT, readProduct } from "./product.js";
+import { runReader } from "./reader.js";
 
 const HELP = `Scribe Reader watcher
 
@@ -22,8 +26,10 @@ const HELP = `Scribe Reader watcher
   target --config /absolute/integration.json
   acknowledge --config /absolute/integration.json --receipt /absolute/receipt.json
   delivery-test|bootstrap --config /absolute/integration.json
+  reader --config /absolute/integration.json -- login|list|probe|sync [arguments]
+  --version
 
-For login, use stop, the existing reader login command, recover, then start.
+For login, use stop, reader --config PATH -- login, recover, then start.
 Delivery-test explicitly queues one transport test without notebook preparation.
 Bootstrap explicitly queues review when no reviewed baseline exists.
 Recovery never retries an accepted queued message. Retrying an uncertain attempt may duplicate delivery.
@@ -46,14 +52,19 @@ type WatchCommand =
     }
   | { kind: "recover"; configPath: string; retryUncertain: boolean }
   | { kind: "acknowledge"; configPath: string; receiptPath: string }
+  | { kind: "reader"; configPath: string; command: ReaderCommand }
+  | { kind: "version" }
   | { kind: "help" };
 
 export function parseWatchCommand(args: string[]): WatchCommand {
   if (args.length === 0 || (args.length === 1 && args[0] === "--help"))
     return { kind: "help" };
+  if (args.length === 1 && args[0] === "--version") return { kind: "version" };
   const [kind, flag, configPath, ...rest] = args;
   if (flag !== "--config" || !configPath)
     throw new ReaderError("invalid-arguments");
+  if (kind === "reader" && rest[0] === "--")
+    return { kind, configPath, command: parseCommand(rest.slice(1)) };
   if (
     kind === "acknowledge" &&
     rest.length === 2 &&
@@ -91,13 +102,41 @@ async function main(): Promise<void> {
     process.stdout.write(HELP);
     return;
   }
+  if (command.kind === "version") {
+    const product = await readProduct(
+      dirname(dirname(dirname(await realpath(process.execPath)))),
+    );
+    process.stdout.write(
+      JSON.stringify({
+        name: PRODUCT.name,
+        ...product.release,
+        runtimeBun: Bun.version,
+      }) + "\n",
+    );
+    return;
+  }
   const config = await readWatchConfig(command.configPath),
     controller = new AbortController();
+  if ((await realpath(process.execPath)) !== config.product.watcher)
+    throw new ReaderError("configured-product-executable-required");
   process.on("SIGTERM", () => controller.abort());
   process.on("SIGINT", () => controller.abort());
   const emit = (value: unknown) =>
     process.stdout.write(JSON.stringify(value) + "\n");
   switch (command.kind) {
+    case "reader": {
+      if ((await ownerStatus(config)).kind !== "stopped")
+        throw new ReaderError("stop-watcher-before-reader-command");
+      const result = await runReader(
+        command.command,
+        config.privateStorage,
+        config.product.reader,
+        controller.signal,
+      );
+      if (typeof result === "string") process.stdout.write(result);
+      else emit(result);
+      return;
+    }
     case "run":
       await runWatcher(config, controller.signal);
       return;

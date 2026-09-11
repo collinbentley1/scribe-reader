@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, spyOn } from "bun:test";
 import {
   chmod,
   mkdir,
@@ -19,7 +19,7 @@ import { fingerprint, sha256 } from "../src/snapshots.js";
 import {
   acknowledge,
   AUDIT_MS,
-  checkOnce,
+  checkOnce as checkOnceImpl,
   durableFile,
   fullAuditDue,
   initialState,
@@ -49,6 +49,21 @@ import {
   serviceCommand,
 } from "../src/watch-service.js";
 import { parseWatchCommand } from "../src/watch-cli.js";
+import { productFixture } from "./product-fixture.js";
+
+function checkOnce(config: WatchConfig, signal: AbortSignal, execute: Execute) {
+  return checkOnceImpl(
+    config,
+    signal,
+    execute,
+    (captureConfig, full, captureSignal) =>
+      execute(
+        captureConfig.product.reader,
+        ["sync", captureConfig.notebookId, ...(full ? ["--full"] : [])],
+        { cwd: "/", timeoutMs: 615_000, signal: captureSignal },
+      ),
+  );
+}
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -96,13 +111,12 @@ test("immutable publication never overwrites a racing winner and accepts equal-c
 async function fixture(): Promise<WatchConfig> {
   const root = await mkdtemp(join(tmpdir(), "scribe-watch-"));
   temporary.push(root);
-  const sourceDirectory = join(root, "source with spaces & characters"),
-    stateRoot = join(root, "state");
+  const stateRoot = join(root, "state");
   const config: WatchConfig = {
     configPath: join(root, "integration.json"),
     workspace: root,
     stateRoot,
-    sourceDirectory,
+    product: await productFixture(root),
     privateStorage: join(root, "profile"),
     notebookId: "synthetic-notebook",
     checkpointPath: join(root, "checkpoint.json"),
@@ -110,16 +124,8 @@ async function fixture(): Promise<WatchConfig> {
     threadId: "12345678-1234-4234-8234-123456789abc",
     codexExecutable: join(root, "fake-codex"),
     pythonExecutable: join(root, "fake-python"),
-    bunExecutable: process.execPath,
     skillPath: join(root, "installed-skill", "SKILL.md"),
   };
-  const electron = join(sourceDirectory, "node_modules", "electron");
-  await mkdir(join(electron, "dist"), { recursive: true });
-  await mkdir(join(sourceDirectory, "dist"), { recursive: true });
-  await writeFile(join(sourceDirectory, "dist", "main.cjs"), "");
-  await writeFile(join(electron, "path.txt"), "fake-electron");
-  await writeFile(join(electron, "dist", "fake-electron"), "");
-  await chmod(join(electron, "dist", "fake-electron"), 0o700);
   return config;
 }
 async function capture(
@@ -699,13 +705,13 @@ test("configuration, receipt, snapshot, and scope boundaries reject changed iden
     readCapture(config, dirname(a.directory), a.digest),
   ).rejects.toThrow("snapshot-path-mismatch");
   const raw = {
-    schema_version: 1,
+    schema_version: 2,
+    app_bundle: config.product.app,
     workspace: config.workspace,
     state_root: config.stateRoot,
     skill: config.skillPath,
     cloud_reader: {
       enabled: true,
-      source_directory: config.sourceDirectory,
       private_storage: PRIVATE_STORAGE,
       notebook_id: config.notebookId,
       review_checkpoint: config.checkpointPath,
@@ -714,12 +720,28 @@ test("configuration, receipt, snapshot, and scope boundaries reject changed iden
       thread_id: config.threadId,
       codex_executable: config.codexExecutable,
       python_executable: config.pythonExecutable,
-      bun_executable: config.bunExecutable,
     },
   };
   await writeFile(config.configPath, JSON.stringify(raw));
   expect((await readWatchConfig(config.configPath)).privateStorage).toBe(
     PRIVATE_STORAGE,
+  );
+  await writeFile(
+    config.configPath,
+    JSON.stringify({ ...raw, schema_version: 1 }),
+  );
+  await expect(readWatchConfig(config.configPath)).rejects.toThrow(
+    "watch-config-invalid",
+  );
+  await writeFile(
+    config.configPath,
+    JSON.stringify({
+      ...raw,
+      watcher: { ...raw.watcher, bun_executable: "/legacy/bun" },
+    }),
+  );
+  await expect(readWatchConfig(config.configPath)).rejects.toThrow(
+    "watch-config-legacy-runtime",
   );
   raw.cloud_reader.private_storage = config.privateStorage;
   await writeFile(config.configPath, JSON.stringify(raw));
@@ -758,7 +780,6 @@ test("launch arguments preserve spaces and XML characters without a shell", asyn
   const config = await fixture(),
     text = launchAgent({
       ...config,
-      bunExecutable: "/usr/local/bin/bun",
       configPath: "/private/A & B/quoted 'file'.json",
     });
   const path = join(config.workspace, "service.plist");
@@ -773,14 +794,20 @@ test("launch arguments preserve spaces and XML characters without a shell", asyn
   expect(result.code).toBe(0);
   const plist = JSON.parse(result.stdout);
   expect(plist.ProgramArguments).toEqual([
-    "/usr/local/bin/bun",
-    "--no-env-file",
-    join(config.sourceDirectory, "dist", "watch.js"),
+    config.product.watcher,
     "run",
     "--config",
     "/private/A & B/quoted 'file'.json",
   ]);
   expect(plist.RunAtLoad).toBe(true);
+  expect(plist.AssociatedBundleIdentifiers).toEqual([
+    "com.cdbentley.scribe-reader",
+  ]);
+  expect(plist.WorkingDirectory).toBe("/");
+  expect(plist.EnvironmentVariables).toEqual({
+    BUN_OPTIONS: "",
+    BUN_BE_BUN: "0",
+  });
   expect(plist.Umask).toBe(63);
   expect(
     parseWatchCommand([
@@ -793,6 +820,25 @@ test("launch arguments preserve spaces and XML characters without a shell", asyn
   ).toMatchObject({ kind: "acknowledge" });
   expect(() =>
     parseWatchCommand(["recover", "--config", "file", "--force"]),
+  ).toThrow("invalid-arguments");
+  expect(parseWatchCommand(["--version"])).toEqual({ kind: "version" });
+  expect(
+    parseWatchCommand([
+      "reader",
+      "--config",
+      "file",
+      "--",
+      "sync",
+      "notebook",
+      "--full",
+    ]),
+  ).toEqual({
+    kind: "reader",
+    configPath: "file",
+    command: { kind: "sync", notebookId: "notebook", full: true },
+  });
+  expect(() =>
+    parseWatchCommand(["reader", "--config", "file", "--", "invalid"]),
   ).toThrow("invalid-arguments");
 });
 
@@ -1045,21 +1091,27 @@ for (const remaining of [
   test(`remove preserves registration when unregistration is not confirmed: ${JSON.stringify(remaining)}`, async () => {
     const { config, launchAgentDirectory, plist } = await serviceFixture(),
       calls: string[][] = [];
+    const now = spyOn(Date, "now").mockReturnValue(0);
     const execute: Execute = async (_executable, args) => {
       calls.push(args);
+      if (args[0] === "print") now.mockReturnValue(30_001);
       return args[0] === "print"
         ? remaining
         : { kind: "completed", code: 1, stdout: "" };
     };
-    await expect(
-      serviceCommand({
-        config,
-        command: "remove",
-        signal: signal(),
-        launchAgentDirectory,
-        execute,
-      }),
-    ).rejects.toThrow("service-stop-unconfirmed");
+    try {
+      await expect(
+        serviceCommand({
+          config,
+          command: "remove",
+          signal: signal(),
+          launchAgentDirectory,
+          execute,
+        }),
+      ).rejects.toThrow("service-stop-unconfirmed");
+    } finally {
+      now.mockRestore();
+    }
     expect(calls.map((args) => args[0])).toEqual(["bootout", "print"]);
     expect(await readFile(plist, "utf8")).toBe(launchAgent(config));
   });
@@ -1081,6 +1133,59 @@ test("a failed bootout is idempotent only when launchctl confirms absence", asyn
     }),
   ).toEqual({ kind: "service-removed" });
   await expect(readFile(plist)).rejects.toThrow();
+});
+
+test("remove waits for a matching launchd job to finish unloading", async () => {
+  const { config, launchAgentDirectory, plist } = await serviceFixture();
+  let prints = 0,
+    bootouts = 0;
+  const execute: Execute = async (_executable, args) => {
+    if (args[0] === "bootout") bootouts++;
+    if (args[0] === "print")
+      return { kind: "completed", code: ++prints < 3 ? 0 : 113, stdout: "" };
+    return { kind: "completed", code: 0, stdout: "" };
+  };
+  expect(
+    await serviceCommand({
+      config,
+      command: "remove",
+      signal: signal(),
+      launchAgentDirectory,
+      execute,
+    }),
+  ).toEqual({ kind: "service-removed" });
+  expect(bootouts).toBe(1);
+  expect(prints).toBe(3);
+  await expect(readFile(plist)).rejects.toThrow();
+});
+
+test("install refuses a missing plist with a loaded or unknown scoped job before writing anything", async () => {
+  const config = await fixture(),
+    launchAgentDirectory = join(config.workspace, "Library", "LaunchAgents");
+  for (const result of [
+    { kind: "completed", code: 0, stdout: "foreign loaded job" },
+    { kind: "timeout" },
+  ] satisfies ProcessResult[]) {
+    const calls: string[][] = [];
+    const execute: Execute = async (_executable, args) => {
+      calls.push(args);
+      return result;
+    };
+    await expect(
+      serviceCommand({
+        config,
+        command: "install",
+        signal: signal(),
+        launchAgentDirectory,
+        execute,
+      }),
+    ).rejects.toThrow("service-unbound-registration");
+    expect(calls).toEqual([
+      ["print", `gui/${process.getuid!()}/${SERVICE_LABEL}`],
+    ]);
+    await expect(readdir(launchAgentDirectory)).rejects.toThrow();
+    await expect(readFile(config.skillPath)).rejects.toThrow();
+  }
 });
 
 test("a missing plist cannot make a loaded unbound service appear stopped", async () => {
@@ -1106,18 +1211,7 @@ test("a missing plist cannot make a loaded unbound service appear stopped", asyn
 
 test("matching service install is repeatable and start kickstarts a loaded stopped job", async () => {
   const config = await fixture(),
-    launchAgentDirectory = join(config.workspace, "LaunchAgents");
-  await mkdir(join(config.sourceDirectory, "skills", "scribe-prep"), {
-    recursive: true,
-  });
-  await writeFile(
-    join(config.sourceDirectory, "skills", "scribe-prep", "SKILL.md"),
-    "synthetic skill",
-  );
-  await writeFile(
-    join(config.sourceDirectory, "dist", "watch.js"),
-    "synthetic build",
-  );
+    launchAgentDirectory = join(config.workspace, "Library", "LaunchAgents");
   await writeFile(config.codexExecutable, "");
   await chmod(config.codexExecutable, 0o700);
   let release: (() => void) | undefined,
@@ -1144,11 +1238,11 @@ test("matching service install is repeatable and start kickstarts a loaded stopp
         timeoutMs: 5000,
         signal: signal(),
       });
-    if (executable === config.bunExecutable)
-      return { kind: "completed", code: 0, stdout: "1.4.2\n" };
     if (executable === config.codexExecutable)
       return { kind: "completed", code: 0, stdout: "queue --thread --message" };
     if (executable === config.pythonExecutable)
+      return { kind: "completed", code: 0, stdout: "" };
+    if (executable === "/usr/bin/codesign")
       return { kind: "completed", code: 0, stdout: "" };
     calls.push(args);
     if (args[0] === "print")
@@ -1199,9 +1293,10 @@ test("service installation checks queue capability without sending a message", a
     launchAgentDirectory = join(config.workspace, "LaunchAgents");
   await writeFile(config.codexExecutable, "");
   await chmod(config.codexExecutable, 0o700);
-  await writeFile(join(config.sourceDirectory, "dist", "watch.js"), "");
   const calls: string[][] = [],
-    execute: Execute = async (_executable, args) => {
+    execute: Execute = async (executable, args) => {
+      if (executable === "/bin/launchctl")
+        return { kind: "completed", code: 113, stdout: "" };
       calls.push(args);
       return { kind: "completed", code: 0, stdout: "older CLI" };
     };

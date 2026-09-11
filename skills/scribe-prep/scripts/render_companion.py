@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -B
 """Render ledger cards as a quiet, readable companion PDF. No delivery."""
 import argparse
 import hashlib

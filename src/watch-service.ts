@@ -1,4 +1,12 @@
-import { access, lstat, mkdir, readlink, rm, symlink } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readlink,
+  realpath,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,7 +15,6 @@ import { ReaderError } from "./domain.js";
 import {
   boundedRead,
   durableFile,
-  electronExecutable,
   isMissing,
   ownerStatus,
   runProcess,
@@ -15,6 +22,7 @@ import {
   type WatchConfig,
   type Execute,
 } from "./watch.js";
+import { PRODUCT } from "./product.js";
 
 export const SERVICE_LABEL = "com.scribe-reader.watch";
 function xml(text: string): string {
@@ -26,20 +34,15 @@ function xml(text: string): string {
     .replaceAll("'", "&apos;");
 }
 export function launchAgent(config: WatchConfig): string {
-  const args = [
-    config.bunExecutable,
-    "--no-env-file",
-    join(config.sourceDirectory, "dist", "watch.js"),
-    "run",
-    "--config",
-    config.configPath,
-  ];
+  const args = [config.product.watcher, "run", "--config", config.configPath];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>${SERVICE_LABEL}</string>
+<key>AssociatedBundleIdentifiers</key><array><string>${PRODUCT.id}</string></array>
 <key>ProgramArguments</key><array>${args.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>
-<key>WorkingDirectory</key><string>${xml(config.workspace)}</string>
+<key>WorkingDirectory</key><string>/</string>
+<key>EnvironmentVariables</key><dict><key>BUN_OPTIONS</key><string></string><key>BUN_BE_BUN</key><string>0</string></dict>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>30</integer>
@@ -55,12 +58,9 @@ async function dependencies(
   signal: AbortSignal,
   execute: Execute,
 ): Promise<void> {
-  await electronExecutable(config);
+  await access(config.product.reader, constants.X_OK);
+  await access(config.product.watcher, constants.X_OK);
   await access(config.codexExecutable, constants.X_OK);
-  await access(
-    join(config.sourceDirectory, "dist", "watch.js"),
-    constants.R_OK,
-  );
   const codex = await execute(config.codexExecutable, ["queue", "--help"], {
     cwd: config.workspace,
     timeoutMs: 10_000,
@@ -73,20 +73,12 @@ async function dependencies(
     !codex.stdout.includes("--message")
   )
     throw new ReaderError("codex-queue-required");
-  const bun = await execute(config.bunExecutable, ["--version"], {
-    cwd: config.workspace,
-    timeoutMs: 5000,
-    signal,
-  });
-  if (
-    bun.kind !== "completed" ||
-    bun.code !== 0 ||
-    bun.stdout.trim() !== "1.4.2"
-  )
+  if (Bun.version !== PRODUCT.bunVersion)
     throw new ReaderError("bun-version-required");
   const python = await execute(
     config.pythonExecutable,
     [
+      "-B",
       "-c",
       "import sys, reportlab; assert sys.version_info >= (3, 10); assert reportlab.Version == '4.4.9'",
     ],
@@ -94,10 +86,21 @@ async function dependencies(
   );
   if (python.kind !== "completed" || python.code !== 0)
     throw new ReaderError("python-reportlab-required");
+  const signed = await execute(
+    "/usr/bin/codesign",
+    ["--verify", "--deep", "--strict", config.product.app],
+    {
+      cwd: "/",
+      timeoutMs: 15_000,
+      signal,
+    },
+  );
+  if (signed.kind !== "completed" || signed.code !== 0)
+    throw new ReaderError("product-signature-required");
 }
 async function installSkill(config: WatchConfig): Promise<void> {
   const installed = dirname(config.skillPath),
-    source = join(config.sourceDirectory, "skills", "scribe-prep");
+    source = config.product.skill;
   await access(join(source, "SKILL.md"), constants.R_OK);
   try {
     const info = await lstat(installed);
@@ -142,6 +145,19 @@ export async function serviceCommand({
   } catch (error) {
     if (!isMissing(error)) throw error;
   }
+  async function presence(): Promise<"loaded" | "absent" | "unknown"> {
+    const result = await execute("/bin/launchctl", ["print", target], {
+      cwd: "/",
+      timeoutMs: 5000,
+      signal,
+    });
+    if (result.kind !== "completed") return "unknown";
+    return result.code === 0
+      ? "loaded"
+      : result.code === 113
+        ? "absent"
+        : "unknown";
+  }
   if (command === "stop" || command === "remove") {
     const before = await inspectOwner();
     if (installed)
@@ -150,13 +166,14 @@ export async function serviceCommand({
         timeoutMs: 30_000,
         signal,
       });
-    const unloaded = await execute("/bin/launchctl", ["print", target], {
-      cwd: config.workspace,
-      timeoutMs: 5000,
-      signal,
-    });
-    if (unloaded.kind !== "completed" || unloaded.code !== 113)
-      throw new ReaderError("service-stop-unconfirmed");
+    const unloadDeadline = Date.now() + 30_000;
+    for (;;) {
+      const current = await presence();
+      if (current === "absent") break;
+      if (current === "unknown" || !installed || Date.now() >= unloadDeadline)
+        throw new ReaderError("service-stop-unconfirmed");
+      await delay(100, undefined, { signal });
+    }
     const owner = await inspectOwner();
     if (owner.kind === "running") {
       if (
@@ -201,19 +218,26 @@ export async function serviceCommand({
       kind: command === "remove" ? "service-removed" : "service-stopped",
     };
   }
+  if (!installed) {
+    const current = await presence();
+    if (current !== "absent")
+      throw new ReaderError("service-unbound-registration");
+    if (command === "start") throw new ReaderError("service-not-installed");
+  }
   await dependencies(config, signal, execute);
   if (command === "install") {
-    if (
-      config.sourceDirectory.includes("/.worktrees/") ||
-      config.sourceDirectory.startsWith("/tmp/")
-    )
-      throw new ReaderError("stable-source-directory-required");
+    const installedApp = await realpath(
+      join(
+        dirname(dirname(launchAgentDirectory)),
+        "Applications",
+        PRODUCT.name + ".app",
+      ),
+    ).catch(() => null);
+    if (config.product.app !== installedApp)
+      throw new ReaderError("installed-product-location-required");
     const owner = await inspectOwner();
     if (installed && owner.kind === "running") {
-      if (
-        (await readlink(dirname(config.skillPath))) !==
-        join(config.sourceDirectory, "skills", "scribe-prep")
-      )
+      if ((await readlink(dirname(config.skillPath))) !== config.product.skill)
         throw new ReaderError(
           "skill-install-conflict-backup-existing-directory",
         );
@@ -226,14 +250,9 @@ export async function serviceCommand({
   }
   if ((await boundedRead(plist)).toString("utf8") !== launchAgent(config))
     throw new ReaderError("service-config-mismatch");
-  const loaded = await execute("/bin/launchctl", ["print", target], {
-    cwd: config.workspace,
-    timeoutMs: 5000,
-    signal,
-  });
-  if (loaded.kind !== "completed" || (loaded.code !== 0 && loaded.code !== 113))
-    throw new ReaderError("service-status-unknown");
-  if (loaded.code === 113) {
+  const loaded = await presence();
+  if (loaded === "unknown") throw new ReaderError("service-status-unknown");
+  if (loaded === "absent") {
     await inspectOwner();
     const result = await execute(
       "/bin/launchctl",

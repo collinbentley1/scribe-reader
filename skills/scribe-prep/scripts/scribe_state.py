@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -B
 """Local reviewed-snapshot ledger. Performs no OCR, network calls, or external effects."""
 import argparse
 import hashlib
