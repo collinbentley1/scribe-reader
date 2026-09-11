@@ -15,7 +15,14 @@ import { parseNotes, parseOpen, type NotebookMetadata } from "../src/domain";
 import { parseCommand } from "../src/cli";
 import { parseRenderedPage } from "../src/protocol";
 import { syncNotebook, sha256, fingerprint } from "../src/snapshots";
-import { pageArchive, png, tar } from "./fixtures";
+import {
+  pageArchive,
+  png,
+  tar,
+  renderMembers,
+  withPax,
+  paxPayload,
+} from "./fixtures";
 import { deflateSync } from "node:zlib";
 import { SETTINGS } from "../src/domain";
 import { PROTOCOL } from "../src/protocol";
@@ -136,7 +143,9 @@ describe("external boundaries", () => {
   });
   test("tar validates framing, checksum, member type, duplicates, and exact coverage", () => {
     const bytes = pageArchive(0);
-    expect(parseRenderedPage(bytes, 0).width).toBe(620);
+    expect(
+      parseRenderedPage(bytes, { notebookId: "synthetic-id", page: 0 }).width,
+    ).toBe(1860);
     expect(() => readTar(bytes.subarray(0, -512))).toThrow("archive-invalid");
     const bad = Buffer.from(bytes);
     bad[0] = 255;
@@ -152,19 +161,25 @@ describe("external boundaries", () => {
         ]),
       ),
     ).toThrow("archive-invalid");
-    expect(() => parseRenderedPage(pageArchive(1), 0)).toThrow(
-      "protocol-unsupported",
-    );
     expect(() =>
-      parseRenderedPage(tar([{ name: "../../outside.png", bytes: png() }]), 0),
-    ).toThrow("protocol-unsupported");
+      parseRenderedPage(pageArchive(1), {
+        notebookId: "synthetic-id",
+        page: 0,
+      }),
+    ).toThrow("page-coverage-invalid");
+    expect(() =>
+      parseRenderedPage(tar([{ name: "../../outside.png", bytes: png() }]), {
+        notebookId: "synthetic-id",
+        page: 0,
+      }),
+    ).toThrow("page-coverage-invalid");
     expect(() =>
       parseRenderedPage(
         tar([
           { name: "page-0.png", bytes: png() },
           { name: "page-1.png", bytes: png() },
         ]),
-        0,
+        { notebookId: "synthetic-id", page: 0 },
       ),
     ).toThrow("page-coverage-invalid");
   });
@@ -185,7 +200,7 @@ describe("external boundaries", () => {
   });
   test("PNG decompression refuses output larger than the declared raster", () => {
     const original = png();
-    const compressed = deflateSync(Buffer.alloc((620 * 4 + 1) * 877 + 1));
+    const compressed = deflateSync(Buffer.alloc((1860 * 3 + 1) * 2480 + 1));
     const chunk = Buffer.alloc(compressed.length + 12);
     chunk.writeUInt32BE(compressed.length, 0);
     chunk.write("IDAT", 4);
@@ -200,7 +215,7 @@ describe("external boundaries", () => {
   });
   test("PNG rejects corruption, wrappers, trailing bytes, oversized dimensions, and unbounded interlace decoding", () => {
     const original = png();
-    expect(validatePng(original)).toEqual({ width: 620, height: 877 });
+    expect(validatePng(original)).toEqual({ width: 1860, height: 2480 });
     const corrupt = Buffer.from(original);
     corrupt[40] = (corrupt[40] ?? 0) ^ 1;
     expect(() => validatePng(corrupt)).toThrow("image-invalid");
@@ -237,9 +252,9 @@ describe("immutable publication", () => {
         file: `page-${index + 1}.png`,
         sha256: sha256(png(index)),
         byteLength: 0,
-        width: 620,
-        height: 877,
-        sourceMemberName: `page-${index}.png`,
+        width: 1860,
+        height: 2480,
+        sourceMemberName: "img_0.png",
         requestRange: { start: index, end: index },
       })),
     };
@@ -366,8 +381,8 @@ describe("immutable publication", () => {
     const manifestPath = join(first.directory, "manifest.json");
     const original = await readFile(manifestPath, "utf8");
     const tampered = original.replace(
-      '"sourceMemberName": "page-0.png"',
-      '"sourceMemberName": "page-999.png"',
+      '"sourceMemberName": "img_0.png"',
+      '"sourceMemberName": "img_999.png"',
     );
     expect(tampered).not.toBe(original);
     await writeFile(manifestPath, tampered);

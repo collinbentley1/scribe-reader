@@ -30,6 +30,35 @@ function nameField(bytes: Buffer): string {
     throw new ReaderError("archive-invalid");
   return value.toString("ascii");
 }
+function validatePaxTimestamps(bytes: Buffer): void {
+  if (bytes.length > 4096) throw new ReaderError("archive-invalid");
+  const keys = new Set(["atime", "ctime", "mtime", "LIBARCHIVE.creationtime"]);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const space = bytes.indexOf(32, offset);
+    if (space < offset + 1 || space > offset + 6)
+      throw new ReaderError("archive-invalid");
+    const prefix = bytes.toString("utf8", offset, space);
+    if (!/^[1-9][0-9]*$/.test(prefix)) throw new ReaderError("archive-invalid");
+    const length = Number(prefix),
+      end = offset + length;
+    if (end <= space + 1 || end > bytes.length || bytes[end - 1] !== 10)
+      throw new ReaderError("archive-invalid");
+    const entry = bytes.subarray(space + 1, end - 1);
+    if ([...entry].some((byte) => byte < 32 || byte > 126))
+      throw new ReaderError("archive-invalid");
+    const text = entry.toString("ascii"),
+      equal = text.indexOf("=");
+    if (equal < 1) throw new ReaderError("archive-invalid");
+    if (!keys.delete(text.slice(0, equal)))
+      throw new ReaderError("protocol-unsupported");
+    const value = text.slice(equal + 1);
+    if (value.length > 64 || !/^-?[0-9]+(?:\.[0-9]+)?$/.test(value))
+      throw new ReaderError("archive-invalid");
+    offset = end;
+  }
+  if (keys.size !== 0) throw new ReaderError("protocol-unsupported");
+}
 export function readTar(bytes: Buffer): ArchiveMember[] {
   if (
     bytes.length > LIMITS.archive ||
@@ -39,18 +68,21 @@ export function readTar(bytes: Buffer): ArchiveMember[] {
     throw new ReaderError("archive-invalid");
   const members: ArchiveMember[] = [],
     names = new Set<string>();
-  let offset = 0;
+  let offset = 0,
+    headers = 0,
+    pendingPaxTarget: string | undefined;
   while (offset + 512 <= bytes.length) {
     const header = bytes.subarray(offset, offset + 512);
     if (header.every((byte) => byte === 0)) {
       if (
+        pendingPaxTarget !== undefined ||
         offset + 1024 > bytes.length ||
         !bytes.subarray(offset).every((byte) => byte === 0)
       )
         throw new ReaderError("archive-invalid");
       return members;
     }
-    if (members.length >= LIMITS.members)
+    if (++headers > LIMITS.members)
       throw new ReaderError("archive-too-many-members");
     let checksum = 0;
     for (let i = 0; i < 512; i++)
@@ -60,7 +92,7 @@ export function readTar(bytes: Buffer): ArchiveMember[] {
     if (!header.subarray(257, 265).equals(Buffer.from("ustar\0" + "00")))
       throw new ReaderError("protocol-unsupported");
     const type = header[156];
-    if (type !== 0 && type !== 48)
+    if (type !== 0 && type !== 48 && type !== 120)
       throw new ReaderError("protocol-unsupported");
     const base = nameField(header.subarray(0, 100)),
       prefix = nameField(header.subarray(345, 500));
@@ -78,7 +110,19 @@ export function readTar(bytes: Buffer): ArchiveMember[] {
       !bytes.subarray(end, next).every((byte) => byte === 0)
     )
       throw new ReaderError("archive-invalid");
-    members.push({ name, bytes: bytes.subarray(begin, end) });
+    const content = bytes.subarray(begin, end);
+    if (type === 120) {
+      if (pendingPaxTarget !== undefined || !name.startsWith("./PaxHeaders.X/"))
+        throw new ReaderError("protocol-unsupported");
+      pendingPaxTarget = name.slice("./PaxHeaders.X/".length);
+      if (!pendingPaxTarget) throw new ReaderError("archive-invalid");
+      validatePaxTimestamps(content);
+    } else {
+      if (pendingPaxTarget !== undefined && pendingPaxTarget !== name)
+        throw new ReaderError("archive-invalid");
+      pendingPaxTarget = undefined;
+      members.push({ name, bytes: content });
+    }
     offset = next;
   }
   throw new ReaderError("archive-invalid");

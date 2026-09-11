@@ -2,7 +2,7 @@
 
 A local macOS reader for Kindle Scribe cloud notebooks. It uses its own Amazon sign-in window and preserves rendered page PNGs without resizing, recompression, or transcription.
 
-The current build supports login, notebook listing, and a bounded single-page protocol probe. Multi-page sync remains disabled until the undocumented rendering protocol has been checked against live responses. Synthetic tests exercise the snapshot implementation but do not establish live compatibility.
+The reader supports login, notebook listing, a bounded single-page probe, and notebook sync. A complete live notebook capture, both repeat-sync modes, and rejection of an edit during capture have been verified on macOS.
 
 This project is independent of Amazon and Obsidian. It does not write to cloud notebooks.
 
@@ -26,9 +26,9 @@ bun --no-env-file run start list
 bun --no-env-file run start probe NOTEBOOK_ID --page 1
 ```
 
-`--page` is a one-based ordinal. The initial probe tests a zero-based request with equal start and end indexes. That interpretation is unverified. A probe saves a bounded raw archive, metadata key/type shape, and receipt privately. `probe-captured-unverified` means the response was saved; it does not mean the page format or ordering was validated.
+`--page` is a one-based ordinal. Requests use a zero-based position with equal start and end indexes. The probe command saves a bounded raw archive, metadata key/type shape, and receipt privately for inspection. It does not run the archive validator. Its `probe-captured-unverified` result means only that the response was saved. The sync command validates each archive before publication.
 
-The following command is implemented but returns `protocol-unverified` until the protocol check is complete:
+Capture a notebook, or force a fresh page-content comparison:
 
 ```sh
 bun --no-env-file run start sync NOTEBOOK_ID
@@ -54,7 +54,6 @@ Each notebook uses a SHA-256-derived directory name. Complete captures live in i
 | `busy`                       | Another command owns the reader profile and publication lock.                              |
 | `authentication-required`    | The service returned an authentication refusal, redirect, or HTML response.                |
 | `protocol-unsupported`       | A service or archive shape falls outside the supported format.                             |
-| `protocol-unverified`        | Live rendering verification has not enabled sync.                                          |
 
 Commands write JSON to standard output. Failures exit with code 1. An unsupported probe metadata receipt is an inspection result, not a successful capture. Electron may write runtime diagnostics to standard error.
 
@@ -70,9 +69,13 @@ The reader writes and flushes a complete staging directory before publishing its
 
 Requests use only fixed HTTPS GET routes on `read.amazon.com`. API redirects are refused. The login window has sandboxing and context isolation enabled, with Node integration disabled. Top-level login navigation permits only the official Amazon reader and US login hosts. There is no cookie export, generic authenticated request command, header override, security-header rewrite, or TLS exception.
 
-Initial limits are 2 MiB per JSON response, 10,000 tree nodes, depth 32, 1,000 pages, 64 MiB per archive, 128 archive members, 16 MiB per PNG, 20 million pixels per PNG, and 1 GiB per capture. Requests time out after 30 seconds. A sync has a 10-minute deadline. Interactive login has a 15-minute deadline.
+Initial limits are 2 MiB per JSON response, 10,000 tree nodes, depth 32, 1,000 pages, 64 MiB per archive, 128 archive headers, including PAX headers, 16 MiB per PNG, 20 million pixels per PNG, and 1 GiB per capture. Requests time out after 30 seconds. A sync has a 10-minute deadline. Interactive login has a 15-minute deadline.
 
-The provisional archive parser accepts regular USTAR members containing plain, non-interlaced, 8-bit PNGs. It validates TAR checksums and framing, exact page coverage, PNG chunk CRCs, decoded dimensions, and bounded decompression. It does not extract member paths onto the filesystem. Other framing is unsupported until observed and explicitly implemented.
+The archive parser accepts USTAR files with bounded timestamp-only PAX headers. PAX records may contain only `atime`, `ctime`, `mtime`, and `LIBARCHIVE.creationtime`; they cannot override paths, sizes, or links. The parser validates record lengths, TAR checksums, padding, and end markers. It does not extract member paths onto the filesystem.
+
+Each supported response contains ten regular files, in any order. The reader binds `manifest.json` to the requested notebook ID and requires a complete fixed-format notebook. It checks the requested global position in `page_data_N_N.json`, one local page, and one full-image reference to `img_0.png`. That image name is local to each response and does not identify a permanent page. Auxiliary notebook metadata is not used to assign page identity.
+
+The raw PNG is the exported page. Observed source images are 1860 by 2480, while the requested canvas is 620 by 877. The reader obtains source dimensions from the PNG and validates a full-image rectangle with uniform scaling centered in the canvas. Letterboxing is supported. Cropping, rotation, unequal scaling, and additional page or image coverage are rejected. PNG validation checks chunk CRCs, non-interlaced 8-bit decoding, and bounded decompression. Source bytes are preserved without applying the viewing transform.
 
 ## Develop and verify
 
@@ -83,9 +86,13 @@ bun --no-env-file run build
 bun --no-env-file run start --help
 ```
 
-Tests generate synthetic pages and real temporary snapshot directories. They cover malformed archives, duplicate pages, PNG corruption, changed content, metadata-only comparison, full comparison, interruption, orphan reuse, and stale staging recovery. The dedicated login window and competing-process `busy` result have also been exercised on macOS. Authenticated rendering remains unverified.
+Tests generate synthetic page archives with fake PAX timestamps and real temporary snapshot directories. They cover notebook and position mismatches, unsupported geometry, PAX overrides, malformed archives, duplicate pages, PNG corruption, changed content, metadata-only comparison, full comparison, interruption, orphan reuse, and stale staging recovery.
 
-`src/account.ts` owns the Electron session and fixed requests. `src/archive.ts` validates archive and PNG bytes. `src/protocol.ts` defines the observed mapping when available. `src/snapshots.ts` owns capture comparison and publication. `src/main.ts` holds process ownership for each CLI command.
+Live verification on September 11, 2026 covered dedicated-profile login, notebook listing, three individual page archives, and a complete 83-page capture. A normal repeat returned `metadata-match` with the same digest and `comparedPageBytes: false`. A `--full` repeat returned `content-compared` with the same digest, `comparedPageBytes: true`, and no changed, added, or removed pages. An edit during an earlier capture returned `remote-changed` and discarded that capture. A competing process returned `busy`.
+
+These results establish the observed capture and comparison behavior. Consistency remains `metadata-bracketed`; the runs do not establish server revision isolation or unattended operation.
+
+`src/account.ts` owns the Electron session and fixed requests. `src/archive.ts` validates archive and PNG bytes. `src/protocol.ts` validates the observed single-page mapping. `src/snapshots.ts` owns capture comparison and publication. `src/main.ts` holds process ownership for each CLI command.
 
 ## Acknowledgment
 
