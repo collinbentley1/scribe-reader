@@ -269,6 +269,20 @@ private final class Capture: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
         web.navigationDelegate = self; web.uiDelegate = self; view = web
         if login {
             NSApplication.shared.setActivationPolicy(.accessory)
+            let menu = NSMenu()
+            let edit = NSMenu(title: "Edit")
+            for (title, action, key) in [
+                ("Cut", #selector(NSText.cut(_:)), "x"),
+                ("Copy", #selector(NSText.copy(_:)), "c"),
+                ("Paste", #selector(NSText.paste(_:)), "v"),
+                ("Select All", #selector(NSText.selectAll(_:)), "a")
+            ] {
+                let item = edit.addItem(withTitle: title, action: action, keyEquivalent: key)
+                item.keyEquivalentModifierMask = .command
+            }
+            let editItem = menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "")
+            editItem.submenu = edit
+            NSApplication.shared.mainMenu = menu
             let panel = NSWindow(contentRect: web.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
             panel.title = "Scribe Reader sign in"; panel.contentView = web; panel.delegate = self
             panel.center(); panel.makeKeyAndOrderFront(nil); window = panel
