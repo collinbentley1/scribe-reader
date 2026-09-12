@@ -26,7 +26,7 @@ class OutputTests(unittest.TestCase):
         self.pdf = self.output / "companion.pdf"
 
     def pdf_command(self, cards=None, output=None):
-        return [sys.executable, str(SCRIPTS / "render_companion.py"), "--cards", str(cards or self.cards),
+        return [sys.executable, "-B", str(SCRIPTS / "render_companion.py"), "--cards", str(cards or self.cards),
                 "--output", str(output or self.pdf)]
 
     def render_pdf(self, cards=None, output=None):
@@ -35,7 +35,7 @@ class OutputTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def ledger(self, command, *args, now="2026-09-11T12:00:00Z"):
-        result = subprocess.run([sys.executable, str(SCRIPTS / "scribe_state.py"), "--root", str(self.root),
+        result = subprocess.run([sys.executable, "-B", str(SCRIPTS / "scribe_state.py"), "--root", str(self.root),
                                  command, *map(str, args), "--now", now], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout)
@@ -106,7 +106,7 @@ class OutputTests(unittest.TestCase):
         process = None
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            process = subprocess.Popen([sys.executable, str(SCRIPTS / "scribe_state.py"), "--root", str(self.root),
+            process = subprocess.Popen([sys.executable, "-B", str(SCRIPTS / "scribe_state.py"), "--root", str(self.root),
                                         "render", "--now", "2026-09-11T12:05:00Z"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             time.sleep(0.2)
             self.assertIsNone(process.poll(), "Ledger command did not wait for the shared lock")

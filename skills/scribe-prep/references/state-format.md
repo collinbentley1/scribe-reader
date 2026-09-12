@@ -3,13 +3,13 @@
 Run the helper directly with Python 3.10 or newer. It uses the standard library. Pass the explicit `state_root` from the private integration configuration with `--root` before the subcommand. There is no default state directory. Keep the watched inbox outside that directory.
 
 ```sh
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" --help
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" scan --inbox "$INBOX"
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" inspect --notebook-id daily --page-id daily-page
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" observe --review /absolute/path/review.json
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" due
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" record --result /absolute/path/result.json
-python3 "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" render
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" --help
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" scan --inbox "$INBOX"
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" inspect --notebook-id daily --page-id daily-page
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" observe --review /absolute/path/review.json
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" due
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" record --result /absolute/path/result.json
+python3 -B "$SKILL/scripts/scribe_state.py" --root "$STATE_ROOT" render
 ```
 
 For isolated evaluation, put `--root /absolute/path/test-state` before the command. Each command accepts `--now 2026-09-11T12:00:00Z` for deterministic verification. Omit `--now` in ordinary operation. Errors return exit status 2 and a JSON error on stderr. Successful commands return JSON on stdout.
@@ -127,7 +127,7 @@ This requires no code edit or database reset. Preserve both fields in later obse
 Run the behavior suite through the actual command:
 
 ```sh
-python3 -m unittest discover -s "$SKILL/tests" -v
+python3 -B -m unittest discover -s "$SKILL/tests" -v
 ```
 
 The tests use isolated synthetic captures. They verify state transitions and the CLI contract, not handwriting recognition, correctness of web facts, access to personal sources, actual draft creation, or Kindle receipt.

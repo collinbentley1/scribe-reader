@@ -11,12 +11,13 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { LIMITS, ReaderError, integer, record, string } from "./domain.js";
 import { sha256, validateSnapshot } from "./snapshots.js";
+import { readProduct, type Product } from "./product.js";
+import { runReader } from "./reader.js";
 
 export const POLL_MS = 300_000;
 export const AUDIT_MS = 86_400_000;
@@ -34,7 +35,7 @@ export type WatchConfig = Readonly<{
   configPath: string;
   workspace: string;
   stateRoot: string;
-  sourceDirectory: string;
+  product: Product;
   privateStorage: string;
   notebookId: string;
   checkpointPath: string;
@@ -42,7 +43,6 @@ export type WatchConfig = Readonly<{
   threadId: string;
   codexExecutable: string;
   pythonExecutable: string;
-  bunExecutable: string;
   skillPath: string;
 }>;
 type Scope = Pick<
@@ -221,8 +221,10 @@ export async function readWatchConfig(
     raw = record(await json(path));
   const cloud = record(raw.cloud_reader),
     watcher = record(raw.watcher);
-  if (raw.schema_version !== 1 || cloud.enabled !== true)
+  if (raw.schema_version !== 2 || cloud.enabled !== true)
     fail("watch-config-invalid");
+  if ("source_directory" in cloud || "bun_executable" in watcher)
+    fail("watch-config-legacy-runtime");
   const privateStorage = absolute(cloud.private_storage);
   if (privateStorage !== PRIVATE_STORAGE) fail("reader-profile-path-mismatch");
   const stateRoot = absolute(raw.state_root),
@@ -232,7 +234,7 @@ export async function readWatchConfig(
     workspace,
     stateRoot,
     privateStorage,
-    sourceDirectory: absolute(cloud.source_directory),
+    product: await readProduct(absolute(raw.app_bundle)),
     notebookId: string(cloud.notebook_id),
     checkpointPath: absolute(cloud.review_checkpoint),
     threadId: eventId(watcher.thread_id),
@@ -242,33 +244,17 @@ export async function readWatchConfig(
         : absolute(watcher.state_directory),
     codexExecutable: absolute(watcher.codex_executable),
     pythonExecutable: absolute(watcher.python_executable),
-    bunExecutable: absolute(watcher.bun_executable),
     skillPath: absolute(raw.skill),
   };
   if (
     config.watchRoot === stateRoot ||
     config.watchRoot === privateStorage ||
-    config.watchRoot === config.sourceDirectory ||
+    config.watchRoot === config.product.app ||
     config.stateRoot === privateStorage ||
     basename(config.skillPath) !== "SKILL.md"
   )
     fail("watch-config-invalid");
   return config;
-}
-export async function electronExecutable(config: WatchConfig): Promise<string> {
-  const root = join(config.sourceDirectory, "node_modules", "electron");
-  const executable = string(
-    (await boundedRead(join(root, "path.txt"), 4096)).toString("utf8").trim(),
-  );
-  const path = resolve(root, "dist", executable);
-  if (!path.startsWith(resolve(root, "dist") + "/"))
-    fail("electron-path-invalid");
-  await access(path, constants.X_OK);
-  await access(
-    join(config.sourceDirectory, "dist", "main.cjs"),
-    constants.R_OK,
-  );
-  return path;
 }
 function parseCapture(value: unknown, config: Scope): Capture {
   const raw = record(value),
@@ -679,7 +665,13 @@ export async function runProcess(
   if (options.signal.aborted) return { kind: "not-started" };
   return new Promise((resolveResult) => {
     const environment = { ...process.env };
-    delete environment.ELECTRON_RUN_AS_NODE;
+    for (const key of [
+      "BUN_OPTIONS",
+      "BUN_BE_BUN",
+      "NODE_OPTIONS",
+      "NODE_PATH",
+    ])
+      delete environment[key];
     const child = spawn(executable, args, {
       cwd: options.cwd,
       env: environment,
@@ -792,12 +784,7 @@ export async function maintainOutput(
   signal: AbortSignal,
   execute: Execute = runProcess,
 ): Promise<string> {
-  const scripts = join(
-      config.sourceDirectory,
-      "skills",
-      "scribe-prep",
-      "scripts",
-    ),
+  const scripts = join(config.product.skill, "scripts"),
     output = join(config.stateRoot, "output");
   const commands = [
     [join(scripts, "scribe_state.py"), "--root", config.stateRoot, "render"],
@@ -810,7 +797,7 @@ export async function maintainOutput(
     ],
   ];
   for (const args of commands) {
-    const result = await execute(config.pythonExecutable, args, {
+    const result = await execute(config.pythonExecutable, ["-B", ...args], {
       cwd: config.workspace,
       timeoutMs: 60_000,
       signal,
@@ -860,10 +847,39 @@ async function restore(config: WatchConfig): Promise<WatchState> {
   }
   return consumeAcknowledgement(config, state);
 }
+export type CaptureCheck = (
+  config: WatchConfig,
+  full: boolean,
+  signal: AbortSignal,
+) => Promise<ProcessResult>;
+async function captureNotebook(
+  config: WatchConfig,
+  full: boolean,
+  signal: AbortSignal,
+): Promise<ProcessResult> {
+  try {
+    const result = await runReader(
+      { kind: "sync", notebookId: config.notebookId, full },
+      config.privateStorage,
+      config.product.reader,
+      signal,
+    );
+    return { kind: "completed", code: 0, stdout: JSON.stringify(result) };
+  } catch (error) {
+    return {
+      kind: "completed",
+      code: 1,
+      stdout: JSON.stringify({
+        kind: error instanceof ReaderError ? error.kind : "local-error",
+      }),
+    };
+  }
+}
 export async function checkOnce(
   config: WatchConfig,
   signal: AbortSignal,
   execute: Execute = runProcess,
+  capture: CaptureCheck = captureNotebook,
 ): Promise<WatchState> {
   let state = await restore(config);
   state = {
@@ -876,17 +892,7 @@ export async function checkOnce(
   }
   const now = new Date().toISOString(),
     full = fullAuditDue(state, Date.parse(now));
-  const executable = await electronExecutable(config);
-  const result = await execute(
-    executable,
-    [
-      config.sourceDirectory,
-      "sync",
-      config.notebookId,
-      ...(full ? ["--full"] : []),
-    ],
-    { cwd: config.sourceDirectory, timeoutMs: LIMITS.syncMs + 15_000, signal },
-  );
+  const result = await capture(config, full, signal);
   state = { ...state, checks: state.checks + 1, lastOutcome: result.kind };
   if (result.kind === "completed") {
     let outcome: Record<string, unknown>;

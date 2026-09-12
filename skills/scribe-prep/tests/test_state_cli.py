@@ -26,7 +26,7 @@ class StateCliTests(unittest.TestCase):
         self.sequence = 0
 
     def command(self, name, *args, success=True):
-        process = subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.root), name,
+        process = subprocess.run([sys.executable, "-B", str(SCRIPT), "--root", str(self.root), name,
                                   *map(str, args), "--now", self.clock], capture_output=True, text=True)
         self.assertEqual(process.returncode, 0 if success else 2, process.stderr)
         return json.loads(process.stdout if success else process.stderr)
@@ -392,7 +392,7 @@ class StateCliTests(unittest.TestCase):
         self.later()
         review = self.review([self.task(status="done")])
         commands = [("observe", "--review", self.json_file(review)), ("record", "--result", self.json_file(result))]
-        processes = [subprocess.Popen([sys.executable, str(SCRIPT), "--root", str(self.root), name,
+        processes = [subprocess.Popen([sys.executable, "-B", str(SCRIPT), "--root", str(self.root), name,
                                       flag, str(path), "--now", self.clock], stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True) for name, flag, path in commands]
         outputs = [process.communicate(timeout=30) for process in processes]
@@ -408,7 +408,7 @@ class StateCliTests(unittest.TestCase):
         output.mkdir()
         fifo = output / "cards.json"
         os.mkfifo(fifo)
-        renderer = subprocess.Popen([sys.executable, str(SCRIPT), "--root", str(self.root), "render",
+        renderer = subprocess.Popen([sys.executable, "-B", str(SCRIPT), "--root", str(self.root), "render",
                                      "--now", self.clock], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         writer = None
         completion = None
@@ -422,7 +422,7 @@ class StateCliTests(unittest.TestCase):
             self.assertIsNotNone(writer, "render did not reach its publication boundary")
             self.later()
             review = self.json_file(self.review([self.task(status="done")]))
-            completion = subprocess.Popen([sys.executable, str(SCRIPT), "--root", str(self.root), "observe",
+            completion = subprocess.Popen([sys.executable, "-B", str(SCRIPT), "--root", str(self.root), "observe",
                                            "--review", str(review), "--now", self.clock],
                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             with self.assertRaises(subprocess.TimeoutExpired):

@@ -6,11 +6,11 @@ The reader uses its own Amazon session. A successful capture means Amazon's clou
 
 ## Use the pinned receipt
 
-In event mode, follow the workflow's `watch target` command. Its immutable receipt binds `capture.directory`, manifest digest and hash, ordered page content, event, and generation. Use only that manifest's declared page files. Do not run another cloud sync or substitute a newer target during review.
+In event mode, follow the workflow's `"$SCRIBE" target --config PATH` command. Its immutable receipt binds `capture.directory`, manifest digest and hash, ordered page content, event, and generation. Use only that manifest's declared page files. Do not run another cloud sync or substitute a newer target during review.
 
 Use `receipt.createdAt` as the capture observation time, or record the actual later visual review time consistently with ledger timestamp rules. A reverted capture can reuse an immutable directory whose `manifest.fetchedAt` is old. Preserve authored date and `active_until`; neither fetch nor receipt time extends task scope.
 
-For explicitly requested manual acquisition, stop the watcher and use the existing reader's `sync NOTEBOOK_ID --full`. Full success returns `snapshot-published` or `content-compared`. Ordinary `metadata-match` does not compare new cloud page bytes. `remote-changed` retains the prior capture, and `busy` means another operation owns the existing profile.
+For explicitly requested manual acquisition, stop the watcher and use `"$SCRIBE" reader --config PATH -- sync NOTEBOOK_ID --full`. Full success returns `snapshot-published` or `content-compared`. Ordinary `metadata-match` does not compare new cloud page bytes. `remote-changed` retains the prior capture, and `busy` means another operation owns the existing profile.
 
 The first watcher check and one check per day perform full audits. Other five-minute checks use modification metadata. Equal-marker edits can wait until the daily audit. Captures remain metadata-bracketed because the service does not promise an atomic server revision. Authentication and unsupported protocol pause acquisition until explicit recovery. Local expiry rendering continues without a model.
 
@@ -32,7 +32,7 @@ Save reviewed observations before preparing work. Advance the checkpoint only af
 
 The checkpoint is agent-owned JSON at `cloud_reader.review_checkpoint`. Preserve useful existing fields and selected-page mappings. Required completion fields are `schema_version: 1`, configured `notebook_id`, `reviewed_snapshot` containing `digest`, `directory`, and `manifest_sha256`, timezone-aware `completed_at`, `selected_pages`, and an empty `pending_page_dispositions` list. Selected pages retain stable ledger notebook/page IDs, current source hashes, ordinal hints, and observation references. An empty selected list is valid only when no pages are admitted.
 
-The acknowledgement helper validates the checkpoint's schema, snapshot, and absence of pending dispositions. The agent remains responsible for the truth and completeness of the review. A completed checkpoint alone is not an acknowledgement. Run `watch acknowledge` with the pinned receipt after review. The helper completes both renderers and publishes the receipt-bound acknowledgement. If it fails, resume the existing checkpoint and ledger, then retry it without repeating completed preparation.
+The acknowledgement helper validates the checkpoint's schema, snapshot, and absence of pending dispositions. The agent remains responsible for the truth and completeness of the review. A completed checkpoint alone is not an acknowledgement. Run `"$SCRIBE" acknowledge --config PATH --receipt RECEIPT` with the pinned receipt after review. The helper completes both renderers and publishes the receipt-bound acknowledgement. If it fails, resume the existing checkpoint and ledger, then retry it without repeating completed preparation.
 
 ## Prepare and finish
 
